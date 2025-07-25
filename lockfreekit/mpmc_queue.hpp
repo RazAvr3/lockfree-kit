@@ -1,12 +1,10 @@
-// This MPMC queue is based on Dmitry Vyukov’s bounded MPMC queue algorithm.
-// Original implementation: https://www.1024cores.net/home/lock-free-algorithms/queues/bounded-mpmc-queue
-// Copyright (c) 2010-2011, Dmitry Vyukov (BSD-like license).
-// Modified for modern C++
+// This code is a modern C++ implementation based on Dmitry Vyukov’s bounded MPMC queue algorithm.
 
 #include <atomic>
 #include <cstddef>
 #include <vector>
 #include <stdexcept>
+#include <print>
 
 namespace lockfreekit {
 
@@ -23,13 +21,13 @@ class MPMCQueue {
         }
     }
 
-    bool enqueue(const T& value) {
+    [[nodiscard]] bool enqueue(const T& value) {
         size_t pos = tail_.load(std::memory_order_relaxed);
 
         for (;;) {
             Cell& cell = buffer_[pos % capacity_];
-            size_t seq = cell.sequence.load(std::memory_order_acquire);
-            intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos);
+            const size_t seq = cell.sequence.load(std::memory_order_acquire);
+            const std::ptrdiff_t diff = static_cast<std::ptrdiff_t>(seq) - static_cast<std::ptrdiff_t>(pos);
 
             if (diff == 0) {
                 // This slot is free (it's our turn)
@@ -41,6 +39,7 @@ class MPMCQueue {
                 }
             } else if (diff < 0) {
                 // Slot not free yet → queue full
+                std::println("Queue is full, cannot enqueue value");
                 return false;
             } else {
                 // Another producer won → retry
@@ -49,13 +48,13 @@ class MPMCQueue {
         }
     }
 
-    bool dequeue(T& result) {
+    [[nodiscard]] bool dequeue(T& result) {
         size_t pos = head_.load(std::memory_order_relaxed);
 
         for (;;) {
             Cell& cell = buffer_[pos % capacity_];
             size_t seq = cell.sequence.load(std::memory_order_acquire);
-            intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos + 1);
+            const std::ptrdiff_t diff = static_cast<std::ptrdiff_t>(seq) - static_cast<std::ptrdiff_t>(pos + 1);
 
             if (diff == 0) {
                 // This slot has data (it's our turn)
@@ -67,6 +66,7 @@ class MPMCQueue {
                 }
             } else if (diff < 0) {
                 // Queue empty
+                std::println("Queue is empty, cannot dequeue value");
                 return false;
             } else {
                 // Another consumer won → retry
@@ -83,8 +83,11 @@ class MPMCQueue {
 
     const size_t capacity_;
     std::vector<Cell> buffer_;
-    alignas(64) std::atomic<size_t> head_{0};
-    alignas(64) std::atomic<size_t> tail_{0};
+    alignas(64) std::atomic<size_t> head_;
+    char pad0[64 - sizeof(head_)];
+    alignas(64) std::atomic<size_t> tail_;
+    char pad1[64 - sizeof(tail_)];
+
 };
 
 }  // namespace lockfreekit

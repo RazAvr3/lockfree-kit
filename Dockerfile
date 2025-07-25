@@ -22,7 +22,7 @@ RUN apt-get install -y clang-17 libc++-17-dev libc++abi-17-dev
 RUN update-alternatives --install /usr/bin/clang clang /usr/bin/clang-17 60 \
     --slave /usr/bin/clang++ clang++ /usr/bin/clang++-17
 
-WORKDIR /workspace
+WORKDIR /lockfreekit_workspace
 
 COPY . .
 
