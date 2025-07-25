@@ -4,42 +4,50 @@
 #include <cstddef>
 #include <vector>
 #include <stdexcept>
-#include <print>
+#include <optional>
 
 namespace lockfreekit {
 
-template <typename T>
+template <typename T, size_t static_capacity = 0>
 class MPMCQueue {
-   public:
-    explicit MPMCQueue(size_t capacity) : capacity_(capacity), buffer_(capacity) {
+public:
+    // Dynamic-capacity constructor (only enabled when static_capacity == 0)
+    explicit MPMCQueue(size_t capacity) requires (static_capacity == 0)
+        : capacity_(capacity), dynamic_buffer_(capacity) {
         if (capacity_ < 1) {
-            throw std::invalid_argument("Capacity must be > 0");
+            throw std::invalid_argument("Queue capacity must be > 0");
         }
-        // Initialize sequence numbers
         for (size_t i = 0; i < capacity_; ++i) {
-            buffer_[i].sequence.store(i, std::memory_order_relaxed);
+            dynamic_buffer_[i].sequence.store(i, std::memory_order_relaxed);
         }
     }
+
+    // Static-capacity constexpr constructor (only when static_capacity > 0)
+     constexpr MPMCQueue() requires (static_capacity > 0)
+        : capacity_(static_capacity) {
+            static_buffer_[i].sequence.store(i, std::memory_order_relaxed);
+        }
+    }
+
 
     [[nodiscard]] bool enqueue(const T& value) {
         size_t pos = tail_.load(std::memory_order_relaxed);
 
         for (;;) {
-            Cell& cell = buffer_[pos % capacity_];
-            const size_t seq = cell.sequence.load(std::memory_order_acquire);
+            Slot& slot = buffer_[pos % capacity_];
+            const size_t seq = slot.sequence.load(std::memory_order_acquire);
             const std::ptrdiff_t diff = static_cast<std::ptrdiff_t>(seq) - static_cast<std::ptrdiff_t>(pos);
 
             if (diff == 0) {
                 // This slot is free (it's our turn)
                 if (tail_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) {
-                    cell.value = value;
+                    slot.value = value;
                     // Publish to consumers
-                    cell.sequence.store(pos + 1, std::memory_order_release);
+                    slot.sequence.store(pos + 1, std::memory_order_release);
                     return true;
                 }
             } else if (diff < 0) {
                 // Slot not free yet → queue full
-                std::println("Queue is full, cannot enqueue value");
                 return false;
             } else {
                 // Another producer won → retry
@@ -48,26 +56,24 @@ class MPMCQueue {
         }
     }
 
-    [[nodiscard]] bool dequeue(T& result) {
+    [[nodiscard]] std::optional<T> dequeue() {
         size_t pos = head_.load(std::memory_order_relaxed);
 
         for (;;) {
-            Cell& cell = buffer_[pos % capacity_];
-            size_t seq = cell.sequence.load(std::memory_order_acquire);
+            Slot& slot = buffer_[pos % capacity_];
+            const size_t seq = slot.sequence.load(std::memory_order_acquire);
             const std::ptrdiff_t diff = static_cast<std::ptrdiff_t>(seq) - static_cast<std::ptrdiff_t>(pos + 1);
 
             if (diff == 0) {
                 // This slot has data (it's our turn)
                 if (head_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) {
-                    result = std::move(cell.value);
+                    T value = std::move(slot.value);
                     // Mark slot as free for producers
-                    cell.sequence.store(pos + capacity_, std::memory_order_release);
-                    return true;
+                    slot.sequence.store(pos + capacity_, std::memory_order_release);
+                    return value;  // Successfully dequeued
                 }
             } else if (diff < 0) {
-                // Queue empty
-                std::println("Queue is empty, cannot dequeue value");
-                return false;
+                return std::nullopt;  // Queue empty
             } else {
                 // Another consumer won → retry
                 pos = head_.load(std::memory_order_relaxed);
@@ -75,19 +81,44 @@ class MPMCQueue {
         }
     }
 
+    [[nodiscard]] size_t approx_size() const noexcept {
+        const auto head = head_.load(std::memory_order_relaxed);
+        const auto tail = tail_.load(std::memory_order_relaxed);
+        return tail - head;
+    }
+
+    [[nodiscard]] size_t capacity() const noexcept { return capacity_; }
+
+    // This function must only be called when no threads
+    // are concurrently enqueuing or dequeuing.
+    void thread_unsafe_clear() noexcept {
+        head_.store(0, std::memory_order_relaxed);
+        tail_.store(0, std::memory_order_relaxed);
+        for (size_t i = 0; i < capacity_; ++i) {
+            buffer_[i].sequence.store(i, std::memory_order_relaxed);
+        }
+    }
+
+    // Delete copy and move operations
+    MPMCQueue(const MPMCQueue&) = delete;
+    MPMCQueue& operator=(const MPMCQueue&) = delete;
+    MPMCQueue(MPMCQueue&&) = delete;
+    MPMCQueue& operator=(MPMCQueue&&) = delete;
+
    private:
-    struct Cell {
+    struct Slot {
         std::atomic<size_t> sequence;
         T value;
     };
 
-    const size_t capacity_;
-    std::vector<Cell> buffer_;
-    alignas(64) std::atomic<size_t> head_;
-    char pad0[64 - sizeof(head_)];
-    alignas(64) std::atomic<size_t> tail_;
-    char pad1[64 - sizeof(tail_)];
+    static constexpr auto CACHE_LINE_SIZE_ = 64;
 
+    const size_t capacity_;
+    std::vector<Slot> buffer_;
+    alignas(CACHE_LINE_SIZE_) std::atomic<size_t> head_;
+    char pad0[CACHE_LINE_SIZE_ - sizeof(head_)];  // Padding to avoid false sharing
+    alignas(CACHE_LINE_SIZE_) std::atomic<size_t> tail_;
+    char pad1[CACHE_LINE_SIZE_ - sizeof(tail_)];  // Padding to avoid false sharing
 };
 
 }  // namespace lockfreekit
