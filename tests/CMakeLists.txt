@@ -5,5 +5,5 @@ add_executable(tests
 
 # Add the header directory for the test
 target_include_directories(tests PRIVATE
-    ${CMAKE_SOURCE_DIR}/lockfreekit
+${CMAKE_SOURCE_DIR}/include
 )
